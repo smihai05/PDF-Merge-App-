@@ -13,6 +13,7 @@ Rulare: python main.py
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tkinter as tk
 from dataclasses import dataclass
@@ -55,6 +56,15 @@ class PdfFileInfo:
     def modified_str(self) -> str:
         """Data ultimei modificări, formatată pentru afișare în listă."""
         return self.modified.strftime("%d.%m.%Y %H:%M")
+
+
+_NATURAL_SORT_SPLIT = re.compile(r"(\d+)")
+
+
+def natural_sort_key(name: str) -> list:
+    """Cheie de sortare "naturală": compară segmentele numerice ca numere, nu ca
+    text, astfel încât "2 fisier.pdf" să apară înaintea lui "10 fisier.pdf"."""
+    return [int(part) if part.isdigit() else part.lower() for part in _NATURAL_SORT_SPLIT.split(name)]
 
 
 class FolderScanError(Exception):
@@ -244,7 +254,7 @@ def configure_dark_theme(root: tk.Tk) -> None:
     # Buton neutru (ex. Browse fără accent explicit)
     style.configure("TButton", background=COLOR_PANEL, foreground=COLOR_TEXT,
                      bordercolor=COLOR_BORDER, focuscolor=COLOR_BG, padding=6,
-                     lightcolor=COLOR_PANEL, darkcolor=COLOR_PANEL)
+                     lightcolor=COLOR_PANEL, darkcolor=COLOR_PANEL) 
     style.map("TButton", background=[("active", COLOR_PANEL_ALT)])
 
     # Butoane "outline" colorate pentru fiecare panou de folder
@@ -501,7 +511,7 @@ class FolderPanel(ttk.LabelFrame):
         query = self.search_var.get().strip().lower()
         filtered = [f for f in self._all_files if query in f.name.lower()]
 
-        key = (lambda f: f.name.lower()) if self._sort_column == "name" else (lambda f: f.modified)
+        key = (lambda f: natural_sort_key(f.name)) if self._sort_column == "name" else (lambda f: f.modified)
         filtered.sort(key=key, reverse=self._sort_reverse)
 
         self.tree.delete(*self.tree.get_children())
