@@ -56,8 +56,10 @@ into commented sections:
 
 Other files in the project:
 
-- `requirements.txt` - Python dependencies (`pypdf`, `tkinterdnd2`).
+- `requirements.txt` - Python dependencies (`pypdf`, `tkinterdnd2`, `Pillow`, `pypdfium2` - renders the page preview in the Rotate window).
 - `app_icon.ico` - the application icon (generated with Pillow).
+- `library_background.jpg` - the library photo used as the animated background; the flying books are cut out of it. Bundled into the exe.
+- `fonts/LuckiestGuy-Regular.ttf` - the interface font (Apache 2.0, license in `fonts/`). Bundled into the exe and loaded privately at startup, so it does not need to be installed.
 - `MergePDF.spec` - the PyInstaller configuration used to build the executable.
 - `dist/MergePDF.exe` - the built executable (no Python installation required).
 
