@@ -1172,6 +1172,7 @@ class FolderPanel(ttk.LabelFrame):
         title: str,
         on_selection_changed: Optional[Callable[[], None]] = None,
         accent: str = "gold",
+        on_list_changed: Optional[Callable[[], None]] = None,
     ) -> None:
         # `accent` alege culoarea panoului ("gold" sau "ember"), ca cele două
         # panouri să se distingă dintr-o privire.
@@ -1181,6 +1182,7 @@ class FolderPanel(ttk.LabelFrame):
         super().__init__(master, text=title, padding=10, labelanchor="n", style=f"{self._accent_prefix}.TLabelframe")
 
         self._on_selection_changed = on_selection_changed
+        self._on_list_changed = on_list_changed  # ex. ca fereastra Rotate să-și sincronizeze lista
         self._all_files: list[PdfFileInfo] = []
         self._sort_column = "name"
         self._sort_reverse = False
@@ -1367,6 +1369,8 @@ class FolderPanel(ttk.LabelFrame):
             self.tree.selection_set(selected_path)
 
         self._notify_selection_changed()
+        if self._on_list_changed:
+            self._on_list_changed()
 
     def focus_list(self) -> None:
         """Mută focusul tastaturii pe lista de fișiere (pe rândul selectat, dacă există)."""
@@ -1485,11 +1489,13 @@ class RotateDialog(tk.Toplevel):
         initial_dir: Optional[str],
         renderer: PreviewRenderer,
         on_close: Callable[[], None],
+        is_blocked: Callable[[], bool] = lambda: False,
     ) -> None:
         super().__init__(master)
         self.title("Rotate PDF")
         self.configure(bg=COLOR_BG)
-        self.transient(master.winfo_toplevel())
+        # Fereastră independentă (nici modală, nici "transient"): un click pe fereastra
+        # principală o aduce pe aceea în față, iar Rotate / Ctrl+R readuce fereastra asta.
         self.resizable(False, False)
         try:
             self.iconbitmap(resource_path(APP_ICON_FILENAME))
@@ -1497,7 +1503,12 @@ class RotateDialog(tk.Toplevel):
             pass
 
         self._on_close_callback = on_close
+        self._is_blocked = is_blocked  # True cât timp fereastra principală salvează un merge
         self._initial_dir = initial_dir
+        # Fișiere adăugate cu "Browse file..." din afara Folder 1: rămân în listă și
+        # după sincronizările cu Folder 1 (cale -> (nume, dată modificare)).
+        self._browsed_files: dict[str, tuple[str, str]] = {}
+        self._last_selected: Optional[str] = None
         self._preview_tk: list[ImageTk.PhotoImage] = []  # referințe ținute cât se afișează imaginile
         self._before_image: Optional[Image.Image] = None  # pagina de dinaintea ultimei rotiri
         self._renderer = renderer
@@ -1526,10 +1537,6 @@ class RotateDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._center_over(master.winfo_toplevel())
         _apply_warm_titlebar(self)
-        try:
-            self.grab_set()  # fereastră modală față de cea principală
-        except tk.TclError:
-            pass  # grab-ul e doar o comoditate - fereastra funcționează și fără el
         self.focus_list()
         self.update_preview()
 
@@ -1554,7 +1561,7 @@ class RotateDialog(tk.Toplevel):
         scrollbar = ttk.Scrollbar(document_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_option_changed())
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._on_tree_select())
 
         ttk.Button(document_frame, text="Browse file...", style="Gold.TButton",
                    command=self._on_browse).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
@@ -1633,6 +1640,43 @@ class RotateDialog(tk.Toplevel):
         self._just_saved = False
         self.update_preview()
 
+    def _on_tree_select(self) -> None:
+        # <<TreeviewSelect>> vine și când lista e reconstruită la sincronizare, cu același
+        # fișier selectat - atunci nu schimbăm nimic (ex. comparația "Before -> Now").
+        path = self._selected_file()
+        if path == self._last_selected:
+            return
+        self._last_selected = path
+        self._on_option_changed()
+
+    def sync_files(self, files: list[tuple[str, str, str]]) -> None:
+        """Aduce lista la zi cu Folder 1 (fișiere noi, șterse, redenumite sau modificate),
+        păstrând selecția și fișierele adăugate cu "Browse file..."."""
+        folder_paths = {path for path, _, _ in files}
+        extras = [(path, *info) for path, info in self._browsed_files.items()
+                  if path not in folder_paths and os.path.exists(path)]
+        rows = extras + list(files)
+        current = [(iid, *self.tree.item(iid, "values")) for iid in self.tree.get_children()]
+        if [row[0] for row in rows] == [row[0] for row in current]:
+            # Aceleași fișiere, în aceeași ordine - actualizăm doar datele (fără pâlpâire)
+            for (path, name, modified), (_, old_name, old_modified) in zip(rows, current):
+                if (name, modified) != (old_name, old_modified):
+                    self.tree.item(path, values=(name, modified))
+            return
+
+        selected = self._selected_file()
+        self.tree.delete(*self.tree.get_children())
+        for path, name, modified in rows:
+            self.tree.insert("", "end", iid=path, values=(name, modified))
+        if selected and self.tree.exists(selected):
+            self.tree.selection_set(selected)
+            self.tree.see(selected)
+        elif rows:
+            # Fișierul selectat a dispărut (șters/redenumit) - trecem la primul din listă
+            self.tree.selection_set(rows[0][0])
+        else:
+            self.update_preview()
+
     def _on_browse(self) -> None:
         path = filedialog.askopenfilename(parent=self, title="Select PDF file",
                                           filetypes=[("PDF files", "*.pdf")], initialdir=self._initial_dir)
@@ -1644,6 +1688,7 @@ class RotateDialog(tk.Toplevel):
             existing = os.path.normpath(path)
             modified = datetime.fromtimestamp(os.path.getmtime(existing)).strftime("%d.%m.%Y %H:%M")
             self.tree.insert("", 0, iid=existing, values=(os.path.basename(existing), modified))
+            self._browsed_files[existing] = (os.path.basename(existing), modified)
         self.tree.selection_set(existing)
         self.focus_list()
 
@@ -1765,6 +1810,9 @@ class RotateDialog(tk.Toplevel):
         path = self._selected_file()
         if not path or self._busy:
             return
+        if self._is_blocked():
+            self.status_var.set("Please wait - a merge is still being saved in the main window...")
+            return
         if self._render_job is not None:
             # Procesul de preview ține fișierul deschis cât îl randează - așteptăm să
             # termine (durează zecimi de secundă), altfel suprascrierea ar eșua.
@@ -1813,9 +1861,13 @@ class RotateDialog(tk.Toplevel):
             return
         if self._poll_job is not None:
             self.after_cancel(self._poll_job)
-        self.grab_release()
         self.destroy()
         self._on_close_callback()
+
+    @property
+    def busy(self) -> bool:
+        """True cât timp o rotire se salvează în fundal."""
+        return self._busy
 
 
 # ======================================================================
@@ -1866,7 +1918,8 @@ class MergeApp(LibraryScene):
     # ---------------------------------------------------------------- construcție UI
     def _build_ui(self) -> None:
         self.panel1 = FolderPanel(
-            self, "Folder 1 - Base file", self._update_merge_button_state, accent="gold"
+            self, "Folder 1 - Base file", self._update_merge_button_state, accent="gold",
+            on_list_changed=self._on_base_list_changed,
         )
         self.panel2 = FolderPanel(
             self, "Folder 2 - File to insert", self._update_merge_button_state, accent="ember"
@@ -2017,18 +2070,20 @@ class MergeApp(LibraryScene):
         return _move_in_radio_group(radios, self.focus_get(), delta)
 
     def _on_enter_key(self, _event: tk.Event) -> str:
-        # Cât timp fereastra Rotate e deschisă, Enter îi aparține ei (rotire, nu merge).
-        if self._rotate_dialog is None and self.merge_button.instate(["!disabled"]):
+        # Enter din fereastra Rotate e tratat (și oprit cu "break") de ea însăși - aici
+        # ajung doar tastele apăsate în fereastra principală.
+        if self.merge_button.instate(["!disabled"]):
             self._on_merge()
         return "break"
 
     # ---------------------------------------------------------------- rotate
     def open_rotate_dialog(self) -> str:
-        """Deschide fereastra Rotate, cu fișierele din Folder 1 și fișierul de bază preselectat."""
-        if self._busy:
-            return "break"  # un merge se salvează încă - poate chiar peste fișierul de rotit
+        """Deschide fereastra Rotate, cu fișierele din Folder 1 și fișierul de bază
+        preselectat - sau o readuce în față, dacă e deja deschisă."""
         if self._rotate_dialog is not None:
+            self._rotate_dialog.deiconify()
             self._rotate_dialog.lift()
+            self._rotate_dialog.focus_force()
             self._rotate_dialog.focus_list()
             return "break"
         self._rotate_dialog = RotateDialog(
@@ -2038,8 +2093,15 @@ class MergeApp(LibraryScene):
             initial_dir=self.panel1.current_folder,
             renderer=self._preview_renderer,
             on_close=self._on_rotate_dialog_closed,
+            is_blocked=lambda: self._busy,
         )
         return "break"
+
+    def _on_base_list_changed(self) -> None:
+        # Folder 1 s-a schimbat (fișier nou/șters/modificat, alt folder, căutare) -
+        # fereastra Rotate, dacă e deschisă, își aduce lista la zi.
+        if self._rotate_dialog is not None:
+            self._rotate_dialog.sync_files(self.panel1.listed_files())
 
     def _on_rotate_dialog_closed(self) -> None:
         self._rotate_dialog = None
@@ -2065,6 +2127,10 @@ class MergeApp(LibraryScene):
 
         if not base_path or not insert_path:
             messagebox.showwarning("Incomplete selection", "Select one file from each folder.")
+            return
+        if self._rotate_dialog is not None and self._rotate_dialog.busy:
+            # Rotirea poate fi chiar pe unul dintre fișierele de combinat
+            self.status_var.set("Please wait - a rotation is still being saved...")
             return
 
         mode = self.merge_mode_var.get()
