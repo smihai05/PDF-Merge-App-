@@ -1,17 +1,3 @@
-"""
-Merge PDF - aplicație desktop pentru combinarea a două fișiere PDF.
-
-Tot codul este într-un singur fișier, organizat pe secțiuni clar delimitate:
-  1. Logică PDF (scanare foldere, operația de merge) - fără tkinter
-  2. Temă vizuală "Biblioteca fermecată" (paletă caldă + stiluri ttk)
-  3. LibraryScene - fundalul animat (rafturi, lumânări plutitoare, cărți zburătoare, praf magic)
-  4. FolderPanel - widget-ul reutilizabil pentru selecția unui folder
-  5. RotateDialog - fereastra de rotire a unui PDF, cu preview
-  6. MergeApp - fereastra principală
-  7. Punct de intrare
-
-Rulare: python main.py
-"""
 from __future__ import annotations
 
 import faulthandler
@@ -1981,7 +1967,7 @@ class MergeApp(LibraryScene):
         self._status_item = self.create_text(0, 0, text="", anchor="w", fill=COLOR_TEXT, font=FONT_DATA, tags="ui")
         self._hint_item = self.create_text(
             0, 0, anchor="w", fill=COLOR_TEXT_MUTED, font=FONT_BASE, tags="ui",
-            text="Keyboard:  ← / → switch section   ↑ / ↓ select   Enter merge   Ctrl+R rotate",
+            text="Keyboard:  ← / → switch folder   ↑ / ↓ select file   Enter merge   Ctrl+R rotate",
         )
         self._status_font = tkfont.Font(font=FONT_DATA)
         self.status_var.trace_add("write", lambda *_: self._refresh_status_text())
@@ -2033,15 +2019,14 @@ class MergeApp(LibraryScene):
 
     # ---------------------------------------------------------------- navigare tastatură
     def _bind_keyboard_navigation(self, master: tk.Tk) -> None:
-        """Săgeți stânga/dreapta: trec între secțiuni (Folder 1 -> Folder 2 -> Merge
-        position -> Save result, circular). Săgeți sus/jos: aleg în secțiunea curentă.
-        Enter: pornește merge-ul de oriunde din aplicație."""
+        """Săgețile navighează doar între listele din Folder 1 și Folder 2.
+        Enter pornește merge-ul de oriunde din aplicație."""
         master.bind_all("<Return>", self._on_enter_key)
         master.bind_all("<KP_Enter>", self._on_enter_key)
         master.bind_all("<Control-r>", lambda _e: self.open_rotate_dialog())
         master.bind_all("<Control-R>", lambda _e: self.open_rotate_dialog())
 
-        zones = [[self.panel1.tree], [self.panel2.tree], self.position_radios, self.output_radios]
+        zones = [[self.panel1.tree], [self.panel2.tree]]
         for index, widgets in enumerate(zones):
             for widget in widgets:
                 widget.bind("<Left>", lambda _e, i=index: self._focus_zone(i - 1))
@@ -2049,25 +2034,16 @@ class MergeApp(LibraryScene):
 
         for radios in (self.position_radios, self.output_radios):
             for radio in radios:
-                radio.bind("<Up>", lambda _e, r=radios: self._move_in_radio_group(r, -1))
-                radio.bind("<Down>", lambda _e, r=radios: self._move_in_radio_group(r, 1))
+                for key in ("<Left>", "<Right>", "<Up>", "<Down>"):
+                    radio.bind(key, lambda _e: "break")
 
     def _focus_zone(self, index: int) -> str:
-        index %= 4
+        index %= 2
         if index == 0:
             self.panel1.focus_list()
-        elif index == 1:
-            self.panel2.focus_list()
         else:
-            radios = self.position_radios if index == 2 else self.output_radios
-            var = self.merge_mode_var if index == 2 else self.output_mode_var
-            # Focus pe opțiunea deja bifată, ca sus/jos să continue de acolo
-            target = next((r for r in radios if str(r.cget("value")) == var.get()), radios[0])
-            target.focus_set()
+            self.panel2.focus_list()
         return "break"
-
-    def _move_in_radio_group(self, radios: list[ttk.Radiobutton], delta: int) -> str:
-        return _move_in_radio_group(radios, self.focus_get(), delta)
 
     def _on_enter_key(self, _event: tk.Event) -> str:
         # Enter din fereastra Rotate e tratat (și oprit cu "break") de ea însăși - aici
