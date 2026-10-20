@@ -4,6 +4,8 @@ Desktop (Windows) application for combining two PDF files, with a tkinter GUI:
 drag & drop folders, a sortable/filterable PDF file list, and a choice of
 where the merge happens (beginning, end, or between pages).
 
+![PDF-Merge-App screenshot](screenshot1.png)
+
 ## Features
 
 - Two folder-selection zones - drag & drop or **Browse** button.
@@ -24,6 +26,8 @@ where the merge happens (beginning, end, or between pages).
   file, invalid page number, etc.).
 - Dark visual theme with teal (Folder 1) and neon red (Folder 2) accents,
   including a dark Windows title bar and a custom icon.
+
+![PDF-Merge-App screenshot](screenshot2.png)
 
 ## Running
 
