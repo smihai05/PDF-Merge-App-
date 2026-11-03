@@ -145,6 +145,62 @@ def remove_numbering(paths: list[str]) -> tuple[int, list[str]]:
     return renamed, skipped
 
 
+_NUMBER_KEY = re.compile(r"^\s*(\d+)")
+
+
+def number_key(filename: str) -> Optional[int]:
+    """Numărul de la începutul numelui ("1 OE2 ..." -> 1, "1" -> 1), sau None."""
+    stem = os.path.splitext(filename)[0]
+    match = _NUMBER_KEY.match(stem)
+    return int(match.group(1)) if match else None
+
+
+def match_by_number(base_paths: list[str], insert_paths: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Leagă fișierele din cele două foldere după număr. Returnează (perechi, observații)."""
+    def group(paths: list[str]) -> dict[int, list[str]]:
+        groups: dict[int, list[str]] = {}
+        for path in paths:
+            key = number_key(os.path.basename(path))
+            if key is not None:
+                groups.setdefault(key, []).append(path)
+        return groups
+
+    base, ins = group(base_paths), group(insert_paths)
+    pairs: list[tuple[str, str]] = []
+    notes: list[str] = []
+    for key in sorted(base):
+        if key not in ins:
+            notes.append(f"{key}: no match in Folder 2")
+        elif len(base[key]) > 1 or len(ins[key]) > 1:
+            notes.append(f"{key}: more than one file with this number (skipped)")
+        else:
+            pairs.append((base[key][0], ins[key][0]))
+    for key in sorted(ins):
+        if key not in base:
+            notes.append(f"{key}: no match in Folder 1")
+    return pairs, notes
+
+
+def auto_merge_pairs(pairs: list[tuple[str, str]], mode: str, insert_after_page: int,
+                     output_mode: str, output_dir: Optional[str]) -> tuple[int, list[str]]:
+    """Face merge pentru fiecare pereche. Returnează (câte au reușit, erori)."""
+    done = 0
+    errors: list[str] = []
+    for base_path, insert_path in pairs:
+        if output_mode == "base":
+            output_path = base_path
+        elif output_mode == "insert":
+            output_path = insert_path
+        else:
+            output_path = os.path.join(output_dir, os.path.basename(base_path))
+        try:
+            merge_pdfs(base_path, insert_path, mode, insert_after_page, output_path)
+            done += 1
+        except Exception as exc:
+            errors.append(f"{os.path.basename(base_path)}: {exc}")
+    return done, errors
+
+
 class MergeError(Exception):
     """Ridicată atunci când operația de merge eșuează (fișier corupt, pagină invalidă etc.)."""
 
@@ -2003,6 +2059,10 @@ class MergeApp(LibraryScene):
         self.remove_button = ttk.Button(self, text="Remove", style="Ember.TButton", command=self._on_remove_numbers)
         self._win_remove = self.create_window(0, 0, window=self.remove_button, anchor="e")
 
+        # Buton mic, dreapta jos, în stânga lui Remove: merge automat după număr
+        self.auto_button = ttk.Button(self, text="Auto Merge", style="Gold.TButton", command=self._on_auto_merge)
+        self._win_auto = self.create_window(0, 0, window=self.auto_button, anchor="e")
+
         # Starea și scurtăturile sunt text desenat direct pe canvas, pe o plăcuță întunecată
         # (tag "ui" - rămân deasupra scenei la fiecare redesenare a ei).
         self._footer = self.create_rectangle(0, 0, 0, 0, fill=COLOR_FIELD, outline=COLOR_BORDER, tags="ui")
@@ -2045,6 +2105,8 @@ class MergeApp(LibraryScene):
         self.itemconfigure(self._win_button, width=button_w, height=button_h)
         self.coords(self._win_rotate, MARGIN, button_top + button_h / 2)
         self.coords(self._win_remove, width - MARGIN, button_top + button_h / 2)
+        self.coords(self._win_auto, width - MARGIN - self.remove_button.winfo_reqwidth() - 12,
+                    button_top + button_h / 2)
 
         column_w = (width - 2 * MARGIN - GAP) / 2
         right_x = MARGIN + column_w + GAP
@@ -2149,6 +2211,61 @@ class MergeApp(LibraryScene):
         if skipped:
             messagebox.showwarning("Some files were skipped", "\n".join(skipped))
 
+    # ---------------------------------------------------------------- auto merge
+    def _on_auto_merge(self) -> None:
+        if self._busy or (self._rotate_dialog is not None and self._rotate_dialog.busy):
+            self.status_var.set("Please wait - an operation is still running...")
+            return
+        if not self.panel1.current_folder or not self.panel2.current_folder:
+            messagebox.showwarning("No folder", "Select a folder in both Folder 1 and Folder 2 first.")
+            return
+
+        pairs, notes = match_by_number(self.panel1.all_paths(), self.panel2.all_paths())
+        if not pairs:
+            messagebox.showinfo("Auto Merge", "No matching numbers found.\n\n" + "\n".join(notes[:15]))
+            return
+
+        mode = self.merge_mode_var.get()
+        insert_after_page = 0
+        if mode == "between":
+            try:
+                insert_after_page = int(self.page_number_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "The page number must be an integer.")
+                return
+            if insert_after_page < 0:
+                messagebox.showerror("Error", "The page number cannot be negative.")
+                return
+
+        output_mode = self.output_mode_var.get()
+        output_dir = None
+        if output_mode == "ask":
+            output_dir = filedialog.askdirectory(title="Choose the folder for the merged files")
+            if not output_dir:
+                return
+        elif not messagebox.askyesno(
+            "Auto Merge", f"{len(pairs)} pair(s) will be merged and the existing files will be OVERWRITTEN.\n\n"
+                          "Continue?"):
+            return
+
+        self._set_busy(f"Auto merging {len(pairs)} pair(s)... (large files can take a while)")
+
+        def on_done(result: object, error: Optional[BaseException]) -> None:
+            self._set_busy(None)
+            if error is not None:
+                messagebox.showerror("Unexpected error", str(error))
+                self.status_var.set("Auto merge failed.")
+                return
+            done, errors = result
+            self.status_var.set(f"[{datetime.now():%H:%M:%S}] Auto merge: {done}/{len(pairs)} merged.")
+            problems = errors + notes
+            if problems:
+                messagebox.showwarning("Auto Merge - details", "\n".join(problems[:20]))
+
+        run_in_background(
+            self, lambda: auto_merge_pairs(pairs, mode, insert_after_page, output_mode, output_dir), on_done
+        )
+
     # ---------------------------------------------------------------- stare UI
     def _update_page_entry_state(self) -> None:
         state = "normal" if self.merge_mode_var.get() == "between" else "disabled"
@@ -2235,6 +2352,7 @@ class MergeApp(LibraryScene):
             self.status_var.set(message)
         self.rotate_button.configure(state="disabled" if self._busy else "normal")
         self.remove_button.configure(state="disabled" if self._busy else "normal")
+        self.auto_button.configure(state="disabled" if self._busy else "normal")
         self._update_merge_button_state()
 
     def _on_close_request(self) -> None:
