@@ -111,6 +111,40 @@ def list_pdf_files(folder: str) -> list[PdfFileInfo]:
     return files
 
 
+_LEADING_NUMBER = re.compile(r"^\s*(\d{1,2})\s+(.+)$")
+
+
+def strip_leading_number(filename: str) -> Optional[str]:
+    """Scoate numărul de la început (1-50). Returnează None dacă nu e nimic de scos."""
+    stem, ext = os.path.splitext(filename)
+    match = _LEADING_NUMBER.match(stem)
+    if not match or not 1 <= int(match.group(1)) <= 50:
+        return None
+    new_stem = match.group(2).strip()
+    return new_stem + ext if new_stem else None
+
+
+def remove_numbering(paths: list[str]) -> tuple[int, list[str]]:
+    """Redenumește fișierele. Returnează (câte au fost redenumite, lista celor sărite)."""
+    renamed = 0
+    skipped: list[str] = []
+    for path in paths:
+        folder, name = os.path.split(path)
+        new_name = strip_leading_number(name)
+        if new_name is None:
+            continue
+        new_path = os.path.join(folder, new_name)
+        if os.path.exists(new_path):
+            skipped.append(f"{name} (există deja: {new_name})")
+            continue
+        try:
+            os.rename(path, new_path)
+            renamed += 1
+        except OSError as exc:
+            skipped.append(f"{name} ({exc})")
+    return renamed, skipped
+
+
 class MergeError(Exception):
     """Ridicată atunci când operația de merge eșuează (fișier corupt, pagină invalidă etc.)."""
 
@@ -1379,6 +1413,10 @@ class FolderPanel(ttk.LabelFrame):
         ca tuple (cale, nume, dată modificare)."""
         return [(iid, *self.tree.item(iid, "values")) for iid in self.tree.get_children()]
 
+    def all_paths(self) -> list[str]:
+        """Toate PDF-urile din folder (indiferent de filtrul de căutare)."""
+        return [f.path for f in self._all_files]
+
     def get_selected_file(self) -> Optional[str]:
         """Returnează calea completă a fișierului PDF selectat în listă, sau None."""
         selection = self.tree.selection()
@@ -1961,6 +1999,10 @@ class MergeApp(LibraryScene):
         self.rotate_button = ttk.Button(self, text="Rotate", style="Gold.TButton", command=self.open_rotate_dialog)
         self._win_rotate = self.create_window(0, 0, window=self.rotate_button, anchor="w")
 
+        # Buton mic, dreapta jos: scoate numerotarea din numele fișierelor din Folder 1
+        self.remove_button = ttk.Button(self, text="Remove", style="Ember.TButton", command=self._on_remove_numbers)
+        self._win_remove = self.create_window(0, 0, window=self.remove_button, anchor="e")
+
         # Starea și scurtăturile sunt text desenat direct pe canvas, pe o plăcuță întunecată
         # (tag "ui" - rămân deasupra scenei la fiecare redesenare a ei).
         self._footer = self.create_rectangle(0, 0, 0, 0, fill=COLOR_FIELD, outline=COLOR_BORDER, tags="ui")
@@ -2002,6 +2044,7 @@ class MergeApp(LibraryScene):
         self.coords(self._win_button, width / 2, button_top)
         self.itemconfigure(self._win_button, width=button_w, height=button_h)
         self.coords(self._win_rotate, MARGIN, button_top + button_h / 2)
+        self.coords(self._win_remove, width - MARGIN, button_top + button_h / 2)
 
         column_w = (width - 2 * MARGIN - GAP) / 2
         right_x = MARGIN + column_w + GAP
@@ -2082,6 +2125,29 @@ class MergeApp(LibraryScene):
     def _on_rotate_dialog_closed(self) -> None:
         self._rotate_dialog = None
         self.panel1.focus_list()
+
+    # ---------------------------------------------------------------- remove numbering
+    def _on_remove_numbers(self) -> None:
+        if self._busy or (self._rotate_dialog is not None and self._rotate_dialog.busy):
+            self.status_var.set("Please wait - an operation is still running...")
+            return
+        folder = self.panel1.current_folder
+        if not folder:
+            messagebox.showwarning("No folder", "Select a folder in Folder 1 first.")
+            return
+        paths = self.panel1.all_paths()
+        count = sum(1 for p in paths if strip_leading_number(os.path.basename(p)))
+        if count == 0:
+            self.status_var.set("No numbered files found in Folder 1.")
+            return
+        if not messagebox.askyesno("Remove numbering", f"Rename {count} file(s) in Folder 1?\n\n"
+                                   'Example: "1 Amenajare cabina PLC.pdf" -> "Amenajare cabina PLC.pdf"'):
+            return
+        renamed, skipped = remove_numbering(paths)
+        self.panel1.load_folder(folder)
+        self.status_var.set(f"[{datetime.now():%H:%M:%S}] Renamed {renamed} file(s) in Folder 1.")
+        if skipped:
+            messagebox.showwarning("Some files were skipped", "\n".join(skipped))
 
     # ---------------------------------------------------------------- stare UI
     def _update_page_entry_state(self) -> None:
@@ -2168,6 +2234,7 @@ class MergeApp(LibraryScene):
         if message is not None:
             self.status_var.set(message)
         self.rotate_button.configure(state="disabled" if self._busy else "normal")
+        self.remove_button.configure(state="disabled" if self._busy else "normal")
         self._update_merge_button_state()
 
     def _on_close_request(self) -> None:
